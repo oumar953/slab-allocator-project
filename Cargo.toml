@@ -1,0 +1,15 @@
+[package]
+name = "slab-allocator"
+version = "0.1.0"
+edition = "2021"
+authors = ["Oumar Kone"]
+description = "A slab allocator inspired by Linux SLUB for a no_std Rust OS kernel"
+
+[dependencies]
+spin = "0.9"
+
+[dev-dependencies]
+
+[lib]
+name = "slab_allocator"
+crate-type = ["lib"]
