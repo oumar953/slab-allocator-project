@@ -146,3 +146,100 @@ unsafe impl GlobalAlloc for LockedSlabAllocator {
 pub fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Force 8-byte alignment so FreeNode writes inside the region are valid.
+    #[repr(align(8))]
+    struct AlignedHeap<const N: usize>([u8; N]);
+
+    // 4096 bytes per cache × 9 caches = 36 864 bytes total.
+    const HEAP_SIZE: usize = 4096 * 9;
+
+    /// Allocating a single object returns a non-null, properly aligned pointer.
+    #[test]
+    fn simple_allocation() {
+        static mut HEAP: AlignedHeap<HEAP_SIZE> = AlignedHeap([0u8; HEAP_SIZE]);
+        let mut alloc = SlabAllocator::new();
+        unsafe {
+            alloc.init(HEAP.0.as_mut_ptr() as usize, HEAP_SIZE);
+            // Request 4 bytes — served by the 8-byte size class.
+            let _layout = Layout::from_size_align(4, 4).unwrap();
+            let ptr = alloc.caches[0].allocate();
+            assert!(!ptr.is_null(), "allocation must succeed");
+            // Pointer must satisfy the minimum alignment (8 bytes on 64-bit).
+            assert_eq!(ptr as usize % 8, 0, "pointer must be 8-byte aligned");
+            alloc.caches[0].deallocate(ptr);
+        }
+    }
+
+    /// Allocating and immediately freeing many objects must not exhaust the cache.
+    #[test]
+    fn alloc_dealloc_cycle() {
+        static mut HEAP: AlignedHeap<HEAP_SIZE> = AlignedHeap([0u8; HEAP_SIZE]);
+        let mut alloc = SlabAllocator::new();
+        unsafe {
+            alloc.init(HEAP.0.as_mut_ptr() as usize, HEAP_SIZE);
+            let cache = &mut alloc.caches[1]; // 16-byte class
+            for _ in 0..100 {
+                let ptr = cache.allocate();
+                assert!(!ptr.is_null());
+                cache.deallocate(ptr);
+            }
+        }
+    }
+
+    /// Stress test: fill the 64-byte cache completely, then free everything.
+    #[test]
+    fn many_boxes() {
+        static mut HEAP: AlignedHeap<HEAP_SIZE> = AlignedHeap([0u8; HEAP_SIZE]);
+        let mut alloc = SlabAllocator::new();
+        unsafe {
+            alloc.init(HEAP.0.as_mut_ptr() as usize, HEAP_SIZE);
+            let cache = &mut alloc.caches[3]; // 64-byte class
+            // Each cache chunk = 4096 bytes → 4096 / 64 = 64 objects.
+            let mut ptrs = [core::ptr::null_mut::<u8>(); 64];
+            for p in ptrs.iter_mut() {
+                *p = cache.allocate();
+                assert!(!p.is_null(), "cache must have capacity for 64 objects");
+            }
+            // Cache is now empty — next allocation must return null.
+            assert!(cache.allocate().is_null(), "exhausted cache must return null");
+            // Free all objects — cache must accept them all back.
+            for p in ptrs.iter_mut() {
+                cache.deallocate(*p);
+            }
+            // After freeing, allocation must work again.
+            let ptr = cache.allocate();
+            assert!(!ptr.is_null(), "cache must be usable after full free");
+            cache.deallocate(ptr);
+        }
+    }
+
+    /// Requesting a size larger than 2048 bytes must return null (not panic).
+    #[test]
+    fn oversized_request_returns_null() {
+        static mut HEAP: AlignedHeap<HEAP_SIZE> = AlignedHeap([0u8; HEAP_SIZE]);
+        let alloc = LockedSlabAllocator::new();
+        unsafe {
+            alloc.init(HEAP.0.as_mut_ptr() as usize, HEAP_SIZE);
+            let layout = Layout::from_size_align(4096, 8).unwrap();
+            let ptr = alloc.alloc(layout);
+            assert!(ptr.is_null(), "request > 2048 bytes must return null");
+        }
+    }
+
+    /// align_up correctness — mirrors section 5 of the research report.
+    #[test]
+    fn align_up_cases() {
+        assert_eq!(align_up(0, 8), 0);
+        assert_eq!(align_up(1, 8), 8);
+        assert_eq!(align_up(8, 8), 8);
+        assert_eq!(align_up(9, 8), 16);
+        assert_eq!(align_up(13, 8), 16);
+        assert_eq!(align_up(16, 8), 16);
+        assert_eq!(align_up(1, 4096), 4096);
+    }
+}
