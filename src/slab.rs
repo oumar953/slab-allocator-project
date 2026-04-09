@@ -68,6 +68,30 @@ pub struct SlabCache {
     pub free_list: *mut FreeNode,
 }
 
+impl SlabCache {
+    /// Creates a new, empty `SlabCache` for objects of `object_size` bytes.
+    ///
+    /// The cache starts with an empty free-list (`free_list` is null).  No
+    /// memory is allocated at this point — call [`SlabCache::grow`] to carve
+    /// out objects from a backing memory region before the first allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slab_allocator::SlabCache;
+    ///
+    /// let cache = SlabCache::new(64);
+    /// assert_eq!(cache.object_size, 64);
+    /// assert!(cache.free_list.is_null());
+    /// ```
+    pub const fn new(object_size: usize) -> Self {
+        SlabCache {
+            object_size,
+            free_list: core::ptr::null_mut(),
+        }
+    }
+}
+
 /// Top-level slab allocator holding one [`SlabCache`] per size class.
 ///
 /// Size classes: 8, 16, 32, 64, 128, 256, 512, 1024, 2048 bytes.
