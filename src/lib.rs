@@ -1,7 +1,7 @@
 #![no_std]
 
 mod slab;
-pub use slab::{SlabAllocator, SlabCache};
+pub use slab::{SlabAllocator, SlabCache, SIZE_CLASSES};
 
 /// Global allocator instance.
 ///

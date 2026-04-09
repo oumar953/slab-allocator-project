@@ -197,7 +197,56 @@ impl SlabCache {
         self.free_list = (*node).next;
         node as *mut u8
     }
+
+    /// Returns a previously allocated object back to the cache.
+    ///
+    /// The pointer is pushed onto the free-list as the new head — O(1).
+    /// This mirrors the SLUB deallocation fast path from section 4 of the
+    /// research report: the old `free_list` value is written *into* the
+    /// object being freed, then the head pointer is updated.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been returned by [`SlabCache::allocate`] on **this
+    ///   exact cache instance** (same `object_size`, same backing region).
+    /// - `ptr` must not be used again after this call (use-after-free).
+    /// - Calling this twice with the same pointer is undefined behaviour
+    ///   (double-free corrupts the free-list).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slab_allocator::SlabCache;
+    ///
+    /// let mut region = [0u8; 128];
+    /// let start = region.as_mut_ptr() as usize;
+    ///
+    /// let mut cache = SlabCache::new(64);
+    /// unsafe { cache.grow(start, 128) };
+    ///
+    /// // Allocate both objects — cache is now empty.
+    /// let p1 = unsafe { cache.allocate() };
+    /// let p2 = unsafe { cache.allocate() };
+    /// assert!(unsafe { cache.allocate() }.is_null());
+    ///
+    /// // Return one object — cache has one slot again.
+    /// unsafe { cache.deallocate(p1) };
+    /// assert!(!unsafe { cache.allocate() }.is_null());
+    /// ```
+    pub unsafe fn deallocate(&mut self, ptr: *mut u8) {
+        // Reinterpret the freed memory as a FreeNode and prepend to the list.
+        let node = ptr as *mut FreeNode;
+        (*node).next = self.free_list;
+        self.free_list = node;
+    }
 }
+
+/// The size classes managed by [`SlabAllocator`], in ascending order.
+///
+/// Each entry is the maximum object size (in bytes) that the corresponding
+/// [`SlabCache`] will serve.  The values are powers of two starting at 8,
+/// matching the design described in section 6 of the research report.
+pub const SIZE_CLASSES: [usize; 9] = [8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
 /// Top-level slab allocator holding one [`SlabCache`] per size class.
 ///
@@ -206,4 +255,43 @@ impl SlabCache {
 pub struct SlabAllocator {
     /// One cache per size class — index 0 → 8 B, index 8 → 2048 B.
     pub caches: [SlabCache; 9],
+}
+
+impl SlabAllocator {
+    /// Creates a new `SlabAllocator` with all nine size-class caches empty.
+    ///
+    /// All caches start with a null free-list.  Call [`SlabAllocator::init`]
+    /// once a heap region is available to carve backing memory into objects.
+    ///
+    /// This function is `const` so it can be used to initialise a
+    /// `static` — required for `#[global_allocator]` registration where the
+    /// allocator must exist before any heap is set up.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slab_allocator::SlabAllocator;
+    ///
+    /// let alloc = SlabAllocator::new();
+    ///
+    /// // All caches start empty.
+    /// for cache in &alloc.caches {
+    ///     assert!(cache.free_list.is_null());
+    /// }
+    /// ```
+    pub const fn new() -> Self {
+        SlabAllocator {
+            caches: [
+                SlabCache::new(SIZE_CLASSES[0]),
+                SlabCache::new(SIZE_CLASSES[1]),
+                SlabCache::new(SIZE_CLASSES[2]),
+                SlabCache::new(SIZE_CLASSES[3]),
+                SlabCache::new(SIZE_CLASSES[4]),
+                SlabCache::new(SIZE_CLASSES[5]),
+                SlabCache::new(SIZE_CLASSES[6]),
+                SlabCache::new(SIZE_CLASSES[7]),
+                SlabCache::new(SIZE_CLASSES[8]),
+            ],
+        }
+    }
 }
