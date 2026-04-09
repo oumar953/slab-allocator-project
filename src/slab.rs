@@ -294,4 +294,59 @@ impl SlabAllocator {
             ],
         }
     }
+
+    /// Initialises the allocator by partitioning a heap region across all
+    /// nine size-class caches.
+    ///
+    /// The heap is divided into equal chunks — one per cache — and each chunk
+    /// is passed to [`SlabCache::grow`] so objects are carved out and linked
+    /// into the free-list immediately.  After `init` returns the allocator is
+    /// ready to serve requests through [`GlobalAlloc`].
+    ///
+    /// # Partitioning strategy
+    ///
+    /// ```text
+    /// heap_start                                         heap_start + heap_size
+    ///   │◄────── chunk ────►│◄────── chunk ────►│  …  │◄────── chunk ────►│
+    ///   │  cache[0] (8 B)   │  cache[1] (16 B)  │     │  cache[8] (2048B) │
+    /// ```
+    ///
+    /// Each chunk is aligned down to a multiple of the cache's `object_size`
+    /// so no partial object slot is created at the chunk boundary.
+    ///
+    /// # Safety
+    ///
+    /// - `heap_start..heap_start + heap_size` must be valid, exclusively
+    ///   owned, writable memory for the lifetime of this `SlabAllocator`.
+    /// - Must be called **exactly once** before any allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slab_allocator::SlabAllocator;
+    ///
+    /// static mut HEAP: [u8; 4096 * 9] = [0u8; 4096 * 9];
+    ///
+    /// let mut alloc = SlabAllocator::new();
+    /// unsafe {
+    ///     let start = HEAP.as_mut_ptr() as usize;
+    ///     alloc.init(start, 4096 * 9);
+    /// }
+    ///
+    /// // Every cache must now have at least one free object.
+    /// for cache in &alloc.caches {
+    ///     assert!(!cache.free_list.is_null());
+    /// }
+    /// ```
+    ///
+    /// [`GlobalAlloc`]: core::alloc::GlobalAlloc
+    pub unsafe fn init(&mut self, heap_start: usize, heap_size: usize) {
+        let chunk_size = heap_size / SIZE_CLASSES.len();
+        for (i, cache) in self.caches.iter_mut().enumerate() {
+            let region_start = heap_start + i * chunk_size;
+            // Trim the chunk down so it holds only whole objects.
+            let usable = (chunk_size / cache.object_size) * cache.object_size;
+            cache.grow(region_start, usable);
+        }
+    }
 }
