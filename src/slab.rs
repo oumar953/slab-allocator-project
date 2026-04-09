@@ -149,6 +149,54 @@ impl SlabCache {
             self.free_list = node;
         }
     }
+
+    /// Allocates one object from this cache by popping the free-list head.
+    ///
+    /// This is the *fast path* described in section 4 of the research report:
+    /// the operation is a single pointer read followed by a pointer update —
+    /// O(1), no search, no arithmetic.
+    ///
+    /// Returns `null` if the cache is empty (the caller must then either call
+    /// [`SlabCache::grow`] or signal an out-of-memory condition).  The
+    /// allocator **never panics**.
+    ///
+    /// # Safety
+    ///
+    /// The returned pointer is valid for `object_size` bytes.  The caller
+    /// must not use it after passing it to [`SlabCache::deallocate`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slab_allocator::SlabCache;
+    ///
+    /// let mut region = [0u8; 256];
+    /// let start = region.as_mut_ptr() as usize;
+    ///
+    /// let mut cache = SlabCache::new(64);
+    /// unsafe { cache.grow(start, 256) };
+    ///
+    /// // Four objects fit in 256 bytes — all must be allocatable.
+    /// let p1 = unsafe { cache.allocate() };
+    /// let p2 = unsafe { cache.allocate() };
+    /// assert!(!p1.is_null());
+    /// assert!(!p2.is_null());
+    /// assert_ne!(p1, p2);
+    ///
+    /// // After four allocations the cache is exhausted.
+    /// unsafe { cache.allocate() };
+    /// unsafe { cache.allocate() };
+    /// assert!(unsafe { cache.allocate() }.is_null());
+    /// ```
+    pub unsafe fn allocate(&mut self) -> *mut u8 {
+        if self.free_list.is_null() {
+            return core::ptr::null_mut();
+        }
+        // Pop the head node off the list.
+        let node = self.free_list;
+        self.free_list = (*node).next;
+        node as *mut u8
+    }
 }
 
 /// Top-level slab allocator holding one [`SlabCache`] per size class.
