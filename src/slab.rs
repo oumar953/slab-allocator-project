@@ -90,6 +90,65 @@ impl SlabCache {
             free_list: core::ptr::null_mut(),
         }
     }
+
+    /// Carves a contiguous memory region into fixed-size objects and links
+    /// them into the free-list.
+    ///
+    /// This is the Rust equivalent of the SLUB page initialisation step: a
+    /// fresh page obtained from the buddy allocator is sliced into
+    /// `object_size`-byte slots and each slot has a [`FreeNode`] written into
+    /// its first bytes so it can participate in the intrusive free-list.
+    ///
+    /// After `grow` returns, [`SlabCache::allocate`] can immediately hand out
+    /// objects without touching any external allocator.
+    ///
+    /// # Memory layout after `grow`
+    ///
+    /// ```text
+    /// heap_start
+    ///   │
+    ///   ▼
+    /// [ FreeNode(next→•) ][ FreeNode(next→•) ][ FreeNode(next=null) ]
+    ///   ▲
+    ///   └── free_list (cache head)
+    /// ```
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that:
+    /// - `heap_start..heap_start + heap_size` is valid, exclusively owned,
+    ///   writable memory for the lifetime of this `SlabCache`.
+    /// - `heap_start` is aligned to at least `align_of::<FreeNode>()` (8 bytes
+    ///   on 64-bit targets).
+    /// - The region is not used by anything else after this call.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slab_allocator::SlabCache;
+    ///
+    /// // Allocate a 4096-byte region on the stack as a stand-in for a heap.
+    /// let mut region = [0u8; 4096];
+    /// let start = region.as_mut_ptr() as usize;
+    ///
+    /// let mut cache = SlabCache::new(64);
+    /// unsafe { cache.grow(start, 4096) };
+    ///
+    /// // free_list must now be non-null (64 objects were carved out).
+    /// assert!(!cache.free_list.is_null());
+    /// ```
+    pub unsafe fn grow(&mut self, heap_start: usize, heap_size: usize) {
+        let n_objects = heap_size / self.object_size;
+
+        for i in 0..n_objects {
+            let addr = heap_start + i * self.object_size;
+            let node = addr as *mut FreeNode;
+            // Write the current free_list head into this object's next field,
+            // then make this object the new head — prepend to the list.
+            (*node).next = self.free_list;
+            self.free_list = node;
+        }
+    }
 }
 
 /// Top-level slab allocator holding one [`SlabCache`] per size class.
